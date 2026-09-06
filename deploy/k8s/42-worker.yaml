@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vsfx-worker
+  namespace: vsfx
+  labels:
+    app: vsfx-worker
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: vsfx-worker
+  template:
+    metadata:
+      labels:
+        app: vsfx-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "9090"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: worker
+          image: ghcr.io/example/vsfx-worker:latest
+          envFrom:
+            - configMapRef:
+                name: vsfx-config
+            - secretRef:
+                name: vsfx-secrets
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: weights
+              mountPath: /srv/weights
+              readOnly: true
+            - name: work
+              mountPath: /srv/work
+      volumes:
+        - name: weights
+          persistentVolumeClaim:
+            claimName: vsfx-weights
+        - name: work
+          emptyDir:
+            sizeLimit: 20Gi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vsfx-worker-pdb
+  namespace: vsfx
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app: vsfx-worker

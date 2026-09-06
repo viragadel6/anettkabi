@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vsfx-postgres
+  namespace: vsfx
+spec:
+  serviceName: vsfx-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vsfx-postgres
+  template:
+    metadata:
+      labels:
+        app: vsfx-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-bookworm
+          env:
+            - name: POSTGRES_USER
+              value: vsfx
+            - name: POSTGRES_DB
+              value: vsfx
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vsfx-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U vsfx -d vsfx"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vsfx-postgres
+  namespace: vsfx
+spec:
+  selector:
+    app: vsfx-postgres
+  ports:
+    - port: 5432
+      targetPort: postgres

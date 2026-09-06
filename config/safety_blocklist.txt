@@ -1,0 +1,68 @@
+Video-to-Video SFX prompt safety blocklist.
+Format: one entry per line; `category:term` assigns a category (default
+`blocklist`); multi-word entries match as normalized phrases; matching is
+de-accented, lowercased, de-leeted, and word-boundary aware.
+CSAM:child sexual abuse
+CSAM:child porn
+CSAM:minor sexual
+CSAM:underage sexual
+CSAM:child nude
+CSAM:kid porn
+CSAM:sexual content involving minors
+CSAM:loli
+CSAM:shota
+CSAM:jailbait
+violence:how to make a bomb
+violence:build a bomb
+violence:pipe bomb
+violence:improvised explosive
+violence:ied detonator
+violence:mass shooting plan
+violence:school shooting
+violence:how to make meth
+violence:synthesize sarin
+violence:nerve agent synthesis
+violence:ricin extraction
+violence:biological weapon
+violence:anthrax culture
+violence:3d printed gun
+violence:ghost gun
+violence:untraceable firearm
+violence:silencer blueprint
+violence:assassination guide
+violence:knuckle duster
+self_harm:how to commit suicide
+self_harm:suicide method
+self_harm:self harm tutorial
+self_harm:cutting techniques
+self_harm:pro ana
+self_harm:thinspiration
+hate:nazi propaganda
+hate:white power chant
+hate:racial slur montage
+hate:lynching recreation
+hate:holocaust denial
+hate:ethnic cleansing speech
+fraud:credit card dump
+fraud:stolen credit card
+fraud:cvv dump
+fraud:ssn leak
+fraud:identity theft kit
+fraud:phishing kit
+fraud:ransomware builder
+fraud:crypto drainer
+fraud:malware source code
+fraud:keylogger build
+fraud:ddos for hire
+fraud:botnet rental
+fraud:counterfeit currency
+fraud:fake id template
+fraud:wire fraud script
+explicit:hardcore porn
+explicit:explicit sex scene
+explicit:graphic sexual act
+explicit:pornographic audio
+terror:isis recruitment
+terror:taliban training
+terror:terror attack plan
+terror:vehicle ramming attack

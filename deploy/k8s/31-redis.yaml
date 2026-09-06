@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vsfx-redis
+  namespace: vsfx
+spec:
+  serviceName: vsfx-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vsfx-redis
+  template:
+    metadata:
+      labels:
+        app: vsfx-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-bookworm
+          args: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+          ports:
+            - containerPort: 6379
+              name: redis
+          volumeMounts:
+            - name: redisdata
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: redisdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vsfx-redis
+  namespace: vsfx
+spec:
+  selector:
+    app: vsfx-redis
+  ports:
+    - port: 6379
+      targetPort: redis

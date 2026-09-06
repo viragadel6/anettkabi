@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vsfx-api
+  namespace: vsfx
+  labels:
+    app: vsfx-api
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: vsfx-api
+  template:
+    metadata:
+      labels:
+        app: vsfx-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/api/v1/metrics"
+        prometheus.io/port: "8000"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: api
+          image: ghcr.io/example/vsfx-api:latest
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: vsfx-config
+            - secretRef:
+                name: vsfx-secrets
+          readinessProbe:
+            httpGet:
+              path: /api/v1/readyz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /api/v1/healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: weights
+              mountPath: /srv/weights
+              readOnly: true
+      volumes:
+        - name: weights
+          persistentVolumeClaim:
+            claimName: vsfx-weights
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vsfx-api
+  namespace: vsfx
+spec:
+  selector:
+    app: vsfx-api
+  ports:
+    - port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vsfx-weights
+  namespace: vsfx
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 10Gi

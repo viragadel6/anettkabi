@@ -1,0 +1,33 @@
+{
+  "name": "vsfx-client",
+  "version": "1.0.0",
+  "description": "TypeScript client SDK for the Video-to-Video SFX service",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --import tsx tests/"
+  },
+  "keywords": [
+    "sfx",
+    "sound-design",
+    "video",
+    "generative-audio",
+    "ffmpeg"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "tsx": "^4.19.0",
+    "typescript": "5.6"
+  }
+}

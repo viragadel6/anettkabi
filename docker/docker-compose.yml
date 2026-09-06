@@ -1,0 +1,144 @@
+name: vsfx
+
+x-app-env: &app-env
+  VSFX_SERVER__PUBLIC_BASE_URL: ${VSFX_PUBLIC_BASE_URL:-http://localhost:8000}
+  VSFX_SERVER__CORS_ORIGINS: '["http://localhost:5173","http://localhost:8080"]'
+  VSFX_DATABASE__DATABASE_URL: postgresql+asyncpg://vsfx:${POSTGRES_PASSWORD:-vsfx}@postgres:5432/vsfx
+  VSFX_REDIS__REDIS_URL: redis://redis:6379/0
+  VSFX_STORAGE__S3_ENDPOINT_URL: http://minio:9000
+  VSFX_STORAGE__S3_BUCKET: ${S3_BUCKET:-vsfx}
+  VSFX_STORAGE__S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  VSFX_STORAGE__S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  VSFX_STORAGE__S3_FORCE_PATH_STYLE: "true"
+  VSFX_SAFETY__SAFETY_BLOCKLIST_PATH: /srv/config/safety_blocklist.txt
+  VSFX_TELEMETRY__LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: vsfx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vsfx}
+      POSTGRES_DB: vsfx
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vsfx -d vsfx"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-bookworm
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-05T11-29-28Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin} &&
+      mc mb --ignore-existing local/${S3_BUCKET:-vsfx} &&
+      mc anonymous set download local/${S3_BUCKET:-vsfx}
+      "
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *app-env
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${WEIGHTS_DIR:-./weights}:/srv/weights:ro
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+      VSFX_JOBS__WORK_DIR: /srv/work
+    volumes:
+      - ${WEIGHTS_DIR:-./weights}:/srv/weights:ro
+      - workdata:/srv/work
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+    profiles: ["full"]
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  workdata:
