@@ -12,8 +12,14 @@ from coordination.wakeup import publish_task_submitted
 from database import check_database_health, session_scope
 from domain.exceptions import InvalidStateTransitionError, TaskNotFoundError
 from observability.metrics import record_task_submission
+from repositories.outbox_repository import OutboxRepository
 from repositories.task_repository import TaskRepository
-from schemas import TaskCreateRequest, TaskResponse
+from schemas import (
+    TaskCreateRequest,
+    TaskDetailResponse,
+    TaskEventPayload,
+    TaskResponse,
+)
 
 __all__ = ["router"]
 
@@ -77,15 +83,20 @@ async def create_task(request: Request, body: TaskCreateRequest) -> JSONResponse
     )
 
 
-@router.get("/v1/tasks/{task_id}", response_model=TaskResponse)
-async def get_task(request: Request, task_id: uuid.UUID) -> TaskResponse:
+@router.get("/v1/tasks/{task_id}", response_model=TaskDetailResponse)
+async def get_task(request: Request, task_id: uuid.UUID) -> TaskDetailResponse:
     session_factory = request.app.state.session_factory
     async with session_scope(session_factory, "api.get_task") as session:
         repository = TaskRepository(session)
         task = await repository.get_task(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    return TaskResponse.from_model(task)
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        outbox_repository = OutboxRepository(session)
+        events = await outbox_repository.fetch_events_for_aggregate(task_id)
+    return TaskDetailResponse(
+        task=TaskResponse.from_model(task),
+        execution_history=[TaskEventPayload.model_validate(event) for event in events],
+    )
 
 
 @router.post("/v1/tasks/{task_id}/retry", response_model=TaskResponse)

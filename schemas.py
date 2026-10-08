@@ -11,6 +11,7 @@ from models import Task
 
 __all__ = [
     "TaskCreateRequest",
+    "TaskDetailResponse",
     "TaskEventPayload",
     "TaskResponse",
 ]
@@ -65,3 +66,8 @@ class TaskEventPayload(BaseModel):
     payload: dict[str, Any]
     published: bool
     created_at: dt.datetime
+
+
+class TaskDetailResponse(BaseModel):
+    task: TaskResponse
+    execution_history: list[TaskEventPayload]
