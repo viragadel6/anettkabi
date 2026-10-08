@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import sys
 from collections.abc import Iterator
 
 from opentelemetry import trace
@@ -24,11 +26,11 @@ __all__ = [
 
 TRACER_NAME = "task_engine"
 
-_provider_configured = False
-
 
 def configure_tracing(service_name: str, environment: str = "production") -> TracerProvider:
-    global _provider_configured
+    current = trace.get_tracer_provider()
+    if isinstance(current, TracerProvider):
+        return current
     resource = Resource.create(
         {
             SERVICE_NAME: service_name,
@@ -36,16 +38,16 @@ def configure_tracing(service_name: str, environment: str = "production") -> Tra
         }
     )
     provider = TracerProvider(resource=resource)
-    provider.add_span_processor(
-        BatchSpanProcessor(
-            ConsoleSpanExporter(),
-            max_queue_size=2048,
-            max_export_batch_size=512,
-            schedule_delay_millis=2000,
+    if os.environ.get("OTEL_TRACES_EXPORTER", "console").lower() != "none":
+        provider.add_span_processor(
+            BatchSpanProcessor(
+                ConsoleSpanExporter(out=sys.stderr),
+                max_queue_size=2048,
+                max_export_batch_size=512,
+                schedule_delay_millis=2000,
+            )
         )
-    )
     trace.set_tracer_provider(provider)
-    _provider_configured = True
     return provider
 
 

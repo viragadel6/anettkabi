@@ -34,9 +34,14 @@ DURATION_BUCKETS = (
 
 DISPATCH_LAG_BUCKETS = (
     0.001,
+    0.003,
     0.005,
+    0.008,
     0.01,
+    0.012,
     0.015,
+    0.018,
+    0.02,
     0.025,
     0.05,
     0.1,
@@ -45,6 +50,10 @@ DISPATCH_LAG_BUCKETS = (
     1.0,
     5.0,
     30.0,
+    60.0,
+    120.0,
+    300.0,
+    600.0,
 )
 
 task_submissions_total = Counter(

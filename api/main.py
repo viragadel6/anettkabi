@@ -49,8 +49,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.redis_client = redis_client
     app.state.relay = relay
     app.state.relay_task = relay_task
-    app.state.relay_healthy = lambda: relay.running and relay.healthy
-    app.state.worker_healthy = lambda: True
 
     logger.info("API startup complete; outbox relay running")
     try:

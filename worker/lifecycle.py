@@ -45,7 +45,12 @@ class WorkerLifecycle:
         init_db(self._settings)
         session_factory = get_session_factory()
         redis_client = create_redis_client(self._settings)
-        self.worker = TaskWorker(session_factory, redis_client, self._settings.worker)
+        self.worker = TaskWorker(
+            session_factory,
+            redis_client,
+            self._settings.worker,
+            submission_channel=self._settings.TASK_SUBMISSION_CHANNEL,
+        )
         self.relay = OutboxRelay(
             session_factory,
             redis_client,

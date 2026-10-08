@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import inspect
 import logging
@@ -12,14 +13,16 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import redis.asyncio as aioredis
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from config import WorkerSettings
 from coordination.distributed_lock import LeaseAcquisitionError, distributed_lease
+from coordination.wakeup import TASK_SUBMITTED_CHANNEL, WakeSubscription
 from database import session_scope
 from domain.exceptions import HandlerNotRegisteredError, TaskOwnershipError
 from domain.state_machine import TaskState
-from models import Task
+from models import OutboxEvent, Task
 from observability.metrics import (
     active_worker_leases,
     queue_dispatch_lag_seconds,
@@ -67,6 +70,7 @@ class TaskWorker:
         redis_client: aioredis.Redis,
         worker_settings: WorkerSettings,
         worker_id: str | None = None,
+        submission_channel: str = TASK_SUBMITTED_CHANNEL,
     ) -> None:
         self._session_factory = session_factory
         self._redis = redis_client
@@ -74,6 +78,11 @@ class TaskWorker:
         self.worker_id = worker_id or f"{socket.gethostname()}-{uuid.uuid4().hex[:12]}"
         self._semaphore = asyncio.Semaphore(worker_settings.CONCURRENCY)
         self._stop_event = asyncio.Event()
+        self._wake_event = asyncio.Event()
+        self._submission_channel = submission_channel
+        self._wake_subscription = WakeSubscription(
+            redis_client, self._wake_event.set, submission_channel
+        )
         self._in_flight: set[asyncio.Task[None]] = set()
         self._running = False
         self._max_poll_interval_seconds = 2.0
@@ -97,13 +106,17 @@ class TaskWorker:
     async def run(self) -> None:
         self._running = True
         logger.info("TaskWorker %s starting with concurrency %d", self.worker_id, self._settings.CONCURRENCY)
+        await self._warm_pool()
+        await self._wake_subscription.start()
         base_interval = self._settings.POLL_INTERVAL_MILLISECONDS / 1000.0
         poll_interval = base_interval
         cycle = 0
         try:
             while not self._stop_event.is_set():
                 if len(self._in_flight) >= self._settings.CONCURRENCY:
-                    await self._sleep_or_stop(base_interval)
+                    woke = await self._sleep_or_stop(base_interval)
+                    if woke:
+                        poll_interval = base_interval
                     continue
                 batch = await self._poll_batch()
                 cycle += 1
@@ -120,8 +133,13 @@ class TaskWorker:
                     poll_interval = min(poll_interval * 2.0, self._max_poll_interval_seconds)
                 if cycle % self._reclaim_every_cycles == 0:
                     await self._reclaim_expired_locks()
-                await self._sleep_or_stop(poll_interval)
+                if batch and len(batch) >= self._settings.BATCH_SIZE:
+                    continue
+                woke = await self._sleep_or_stop(poll_interval)
+                if woke:
+                    poll_interval = base_interval
         finally:
+            await self._wake_subscription.stop()
             await self._drain(self._settings.DRAIN_TIMEOUT_SECONDS)
             await self._release_worker_locks()
             self._running = False
@@ -134,11 +152,86 @@ class TaskWorker:
         while self._running and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
 
-    async def _sleep_or_stop(self, seconds: float) -> None:
-        try:
-            await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
-            pass
+    async def _warm_pool(self) -> None:
+        lease = dt.timedelta(seconds=self._settings.LOCK_TTL_SECONDS)
+
+        def scratch_task() -> Task:
+            return Task(
+                idempotency_key=f"warmup-{uuid.uuid4().hex}"[:64],
+                task_type="warmup.prepare",
+                state=TaskState.PENDING,
+                payload={},
+                retry_count=0,
+                max_retries=5,
+                scheduled_at=dt.datetime.now(tz=dt.UTC),
+            )
+
+        async def warm_one() -> None:
+            session = self._session_factory()
+            try:
+                repository = TaskRepository(session)
+                await repository.acquire_next_batch(
+                    self._settings.BATCH_SIZE, self.worker_id, lease
+                )
+                session.add(scratch_task())
+                await session.flush()
+                acquired = await repository.acquire_next_batch(1, self.worker_id, lease)
+                if acquired:
+                    scratch_id = acquired[0].id
+                    await repository.mark_running(scratch_id, self.worker_id, lease)
+                    await repository.record_success(scratch_id, self.worker_id, {}, 0.0)
+                    await repository.extend_task_lock(scratch_id, self.worker_id, lease)
+                session.add(scratch_task())
+                await session.flush()
+                pending_rows = await repository.acquire_next_batch(1, self.worker_id, lease)
+                if pending_rows:
+                    failure_id = pending_rows[0].id
+                    await repository.mark_running(failure_id, self.worker_id, lease)
+                    await repository.record_failure(failure_id, self.worker_id, {}, 0.0)
+                    await session.execute(
+                        sa_update(Task)
+                        .where(Task.id == failure_id)
+                        .values(state=TaskState.DEAD_LETTER)
+                    )
+                    await repository.requeue_dead_lettered_task(failure_id)
+                session.add(
+                    OutboxEvent(
+                        aggregate_type="Task",
+                        aggregate_id=uuid.uuid4(),
+                        event_type="Warmup",
+                        payload={"worker_id": self.worker_id},
+                    )
+                )
+                await session.flush()
+                await repository.reclaim_expired_locks()
+                await repository.release_worker_locks(self.worker_id)
+            except Exception:
+                logger.warning("Pool warmup failed; statements will prepare on demand")
+            finally:
+                await session.rollback()
+                await session.close()
+
+        await asyncio.gather(
+            *[warm_one() for _ in range(self._settings.CONCURRENCY)],
+            return_exceptions=True,
+        )
+
+    async def _sleep_or_stop(self, seconds: float) -> bool:
+        stop_waiter = asyncio.ensure_future(self._stop_event.wait())
+        wake_waiter = asyncio.ensure_future(self._wake_event.wait())
+        done, pending = await asyncio.wait(
+            {stop_waiter, wake_waiter},
+            timeout=seconds,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for waiter in pending:
+            waiter.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await waiter
+        woke = wake_waiter in done
+        if woke:
+            self._wake_event.clear()
+        return woke
 
     async def _poll_batch(self) -> list[Task]:
         lease_duration = dt.timedelta(seconds=self._settings.LOCK_TTL_SECONDS)
@@ -258,10 +351,8 @@ class TaskWorker:
                     record_span_error(span, exc)
         finally:
             heartbeat_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await heartbeat_task
-            except (asyncio.CancelledError, Exception):
-                pass
 
     async def _invoke_handler(
         self, handler: TaskHandler, payload: dict[str, Any]

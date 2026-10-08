@@ -5,7 +5,8 @@ import random
 import uuid
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select, update
+import sqlalchemy as sa
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,11 +23,48 @@ __all__ = [
     "BACKOFF_JITTER_LOW",
     "BACKOFF_MAX_SECONDS",
     "TaskRepository",
+    "compute_backoff_seconds",
 ]
 
 BACKOFF_MAX_SECONDS = 3600.0
 BACKOFF_JITTER_LOW = 0.8
 BACKOFF_JITTER_HIGH = 1.2
+
+_ACQUIRE_BATCH_SQL = text(
+    """
+    WITH candidates AS (
+        SELECT t.id
+        FROM tasks t
+        WHERE t.state = 'PENDING'
+          AND t.scheduled_at <= now()
+          AND (t.lock_expires_at IS NULL OR t.lock_expires_at < now())
+        ORDER BY t.scheduled_at ASC, t.id ASC
+        LIMIT :batch_size
+        FOR UPDATE OF t SKIP LOCKED
+    )
+    UPDATE tasks t
+    SET state = 'ACQUIRED',
+        locked_by = :worker_id,
+        lock_expires_at = now() + :lease_duration,
+        updated_at = CLOCK_TIMESTAMP()
+    FROM candidates c
+    WHERE t.id = c.id
+    RETURNING t.id, t.idempotency_key, t.task_type, t.state, t.payload,
+              t.result, t.error_detail, t.retry_count, t.max_retries,
+              t.backoff_base_seconds, t.locked_by, t.lock_expires_at,
+              t.scheduled_at, t.created_at, t.updated_at
+    """
+)
+
+_STALENESS_SQL = text(
+    """
+    SELECT min(t.scheduled_at)
+    FROM tasks t
+    WHERE t.state = 'PENDING'
+      AND (t.lock_expires_at IS NULL OR t.lock_expires_at < now())
+      AND t.scheduled_at <= now() - make_interval(secs => :threshold_seconds)
+    """
+)
 
 
 def _utc_now() -> dt.datetime:
@@ -71,8 +109,6 @@ class TaskRepository:
         result = await self._session.execute(statement)
         created_row = result.scalar_one_or_none()
         if created_row is not None:
-            await self._session.flush()
-            await self._session.refresh(created_row)
             self._session.add(
                 OutboxEvent(
                     aggregate_type="Task",
@@ -111,29 +147,36 @@ class TaskRepository:
         worker_id: str,
         lease_duration: dt.timedelta,
     ) -> list[Task]:
-        statement = (
-            select(Task)
-            .where(
-                Task.state == TaskState.PENDING,
-                Task.scheduled_at <= func.now(),
-                or_(
-                    Task.lock_expires_at.is_(None),
-                    Task.lock_expires_at < func.now(),
-                ),
-            )
-            .order_by(Task.scheduled_at.asc(), Task.id.asc())
-            .limit(batch_size)
-            .with_for_update(skip_locked=True)
+        result = await self._session.execute(
+            _ACQUIRE_BATCH_SQL,
+            {
+                "batch_size": batch_size,
+                "worker_id": worker_id,
+                "lease_duration": lease_duration,
+            },
         )
-        result = await self._session.execute(statement)
-        tasks = list(result.scalars().all())
-        for task in tasks:
-            TaskStateMachine.validate_transition(task.state, TaskState.ACQUIRED)
-            task.state = TaskState.ACQUIRED
-            task.locked_by = worker_id
-            task.lock_expires_at = func.now() + lease_duration
-            self._session.add(task)
-            self._session.add(
+        rows = result.mappings().all()
+        tasks: list[Task] = []
+        events: list[OutboxEvent] = []
+        for row in rows:
+            task = Task()
+            task.id = row["id"]
+            task.idempotency_key = row["idempotency_key"]
+            task.task_type = row["task_type"]
+            task.state = TaskState(row["state"])
+            task.payload = row["payload"]
+            task.result = row["result"]
+            task.error_detail = row["error_detail"]
+            task.retry_count = row["retry_count"]
+            task.max_retries = row["max_retries"]
+            task.backoff_base_seconds = row["backoff_base_seconds"]
+            task.locked_by = row["locked_by"]
+            task.lock_expires_at = row["lock_expires_at"]
+            task.scheduled_at = row["scheduled_at"]
+            task.created_at = row["created_at"]
+            task.updated_at = row["updated_at"]
+            tasks.append(task)
+            events.append(
                 OutboxEvent(
                     aggregate_type="Task",
                     aggregate_id=task.id,
@@ -147,9 +190,9 @@ class TaskRepository:
                     },
                 )
             )
-        await self._session.flush()
-        for task in tasks:
-            await self._session.refresh(task)
+        if events:
+            self._session.add_all(events)
+            await self._session.flush()
         return tasks
 
     async def mark_running(
@@ -163,7 +206,6 @@ class TaskRepository:
         task.state = TaskState.RUNNING
         task.lock_expires_at = _utc_now() + lease_duration
         await self._session.flush()
-        await self._session.refresh(task)
         return task
 
     async def extend_task_lock(
@@ -211,7 +253,6 @@ class TaskRepository:
             )
         )
         await self._session.flush()
-        await self._session.refresh(task)
         return task
 
     async def record_failure(
@@ -250,9 +291,7 @@ class TaskRepository:
                     "task_id": str(task.id),
                     "task_type": task.task_type,
                     "worker_id": worker_id,
-                    "state": task.state.value
-                    if isinstance(task.state, TaskState)
-                    else str(task.state),
+                    "state": task.state.value,
                     "retry_count": task.retry_count,
                     "max_retries": task.max_retries,
                     "duration_seconds": duration_seconds,
@@ -261,7 +300,6 @@ class TaskRepository:
             )
         )
         await self._session.flush()
-        await self._session.refresh(task)
         return task, exhausted
 
     async def requeue_dead_lettered_task(self, task_id: uuid.UUID) -> Task:
@@ -334,7 +372,15 @@ class TaskRepository:
         result = await self._session.execute(
             select(Task.state, func.count(Task.id)).group_by(Task.state)
         )
-        return {str(state): int(count) for state, count in result.all()}
+        return {str(state.value if isinstance(state, TaskState) else state): int(count) for state, count in result.all()}
+
+    async def oldest_stale_pending_at(
+        self, threshold_seconds: float
+    ) -> dt.datetime | None:
+        result = await self._session.execute(
+            _STALENESS_SQL, {"threshold_seconds": float(threshold_seconds)}
+        )
+        return result.scalar_one_or_none()
 
     async def _get_owned_task(self, task_id: uuid.UUID, worker_id: str) -> Task:
         result = await self._session.execute(

@@ -21,7 +21,6 @@ class TaskCreateRequest(BaseModel):
 
     task_type: str = Field(min_length=1, max_length=128)
     payload: dict[str, Any] = Field(default_factory=dict)
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=64)
     delay_seconds: float = Field(default=0.0, ge=0.0, le=86400.0)
     max_retries: int = Field(default=5, ge=0, le=100)
 

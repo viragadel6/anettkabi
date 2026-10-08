@@ -69,6 +69,7 @@ class WorkerSettings(BaseSettings):
     POLL_INTERVAL_MILLISECONDS: int = Field(default=200, ge=10, le=60000)
     DRAIN_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0, le=600.0)
     BATCH_SIZE: int = Field(default=8, ge=1, le=512)
+    PENDING_STALENESS_THRESHOLD_SECONDS: float = Field(default=60.0, gt=0.0, le=86400.0)
 
     @model_validator(mode="after")
     def validate_lease_relationships(self) -> WorkerSettings:
@@ -88,6 +89,7 @@ class Settings(BaseSettings):
     OTEL_SERVICE_NAME_API: str = Field(default="task-engine-api")
     OTEL_SERVICE_NAME_WORKER: str = Field(default="task-engine-worker")
     OUTBOX_STREAM_NAME: str = Field(default="task_engine:outbox_events")
+    TASK_SUBMISSION_CHANNEL: str = Field(default="task_engine:task_submitted")
 
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)

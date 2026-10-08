@@ -13,6 +13,11 @@ from coordination.distributed_lock import (
     distributed_lease,
     get_redis_client,
 )
+from coordination.wakeup import (
+    TASK_SUBMITTED_CHANNEL,
+    WakeSubscription,
+    publish_task_submitted,
+)
 
 __all__ = [
     "ACQUIRE_SCRIPT",
@@ -26,4 +31,7 @@ __all__ = [
     "create_redis_client",
     "distributed_lease",
     "get_redis_client",
+    "TASK_SUBMITTED_CHANNEL",
+    "WakeSubscription",
+    "publish_task_submitted",
 ]

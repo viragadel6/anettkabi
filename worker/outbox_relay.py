@@ -42,6 +42,12 @@ class OutboxRelay:
     def running(self) -> bool:
         return self._running
 
+    @property
+    def state(self) -> str:
+        if not self._running or self._stop_event.is_set():
+            return "stopped"
+        return "running" if self.healthy else "degraded"
+
     def stop(self) -> None:
         self._stop_event.set()
 
